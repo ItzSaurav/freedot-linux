@@ -1,0 +1,9 @@
+# FreeDot Build Artifacts
+build/
+*.iso
+*.img
+*.tar.gz
+*.o
+*.ko
+*.initrd
+initramfs.cpio*
