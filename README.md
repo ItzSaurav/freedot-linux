@@ -9,3 +9,4 @@ A reproducible, minimal Linux system built to explore Linux bootstrapping, users
 - Host Dev RAM Limit: 2 GB
 - Kernel: Upstream Linux LTS
 - Init/Userspace: Minimal custom init / BusyBox
+###Comming soon 
