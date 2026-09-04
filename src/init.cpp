@@ -1,3 +1,7 @@
+// FreeDot Custom C++ Init System (PID 1)
+// Built from scratch to handle Linux userspace initialization without systemd bloat.
+// No extra dependencies, just pure C++20 and native Linux syscalls.
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -24,11 +28,13 @@
 
 namespace fs = std::filesystem;
 
+// Distinguish background services from interactive console sessions
 enum class ServiceType {
     DAEMON,
     INTERACTIVE_SHELL
 };
 
+// Unit representation for running services
 struct Service {
     std::string name;
     std::string path;
@@ -38,14 +44,19 @@ struct Service {
     bool respawn = true;
 };
 
+// Global init state
 static std::vector<Service> services;
 static volatile sig_atomic_t poweroff_requested = 0;
 static volatile sig_atomic_t reboot_requested = 0;
 static int server_sock_fd = -1;
 
+// Standard Linux runtime paths
 constexpr const char* SOCKET_PATH = "/run/freedot.sock";
 constexpr const char* CONFIG_DIR = "/etc/freedot.d";
 
+// In Linux, PID 1 must reap dead child processes or they turn into zombie processes.
+// Whenever a child exits, SIGCHLD fires. We catch it and call waitpid with WNOHANG
+// so we reap the zombie process without blocking the main event loop.
 void handle_sigchld(int sig) {
     (void)sig;
     int status;
@@ -53,13 +64,14 @@ void handle_sigchld(int sig) {
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         for (auto& svc : services) {
             if (svc.pid == pid) {
-                svc.pid = -1;
+                svc.pid = -1; // Mark service as stopped so the main loop can respawn it if needed
                 break;
             }
         }
     }
 }
 
+// Trap shutdown signals from kernel or external power buttons
 void handle_shutdown_signal(int sig) {
     if (sig == SIGINT || sig == SIGPWR) {
         poweroff_requested = 1;
@@ -68,6 +80,9 @@ void handle_shutdown_signal(int sig) {
     }
 }
 
+// Low-level network configuration via Linux ioctl calls.
+// Rather than relying on external tools like ifconfig or iproute2, we configure
+// interface IP, netmask, and flags directly through kernel socket ioctls.
 bool configure_interface(const std::string& ifname, const std::string& ip, const std::string& netmask) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
@@ -79,6 +94,7 @@ bool configure_interface(const std::string& ifname, const std::string& ip, const
     std::memset(&ifr, 0, sizeof(ifr));
     std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
 
+    // 1. Assign IP address to interface
     struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_addr);
     addr->sin_family = AF_INET;
     inet_pton(AF_INET, ip.c_str(), &addr->sin_addr);
@@ -87,6 +103,7 @@ bool configure_interface(const std::string& ifname, const std::string& ip, const
         return false;
     }
 
+    // 2. Assign subnet mask to interface
     struct sockaddr_in* mask = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_netmask);
     mask->sin_family = AF_INET;
     inet_pton(AF_INET, netmask.c_str(), &mask->sin_addr);
@@ -95,6 +112,7 @@ bool configure_interface(const std::string& ifname, const std::string& ip, const
         return false;
     }
 
+    // 3. Bring the interface up and mark it running
     if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
         close(sock);
         return false;
@@ -109,6 +127,7 @@ bool configure_interface(const std::string& ifname, const std::string& ip, const
     return true;
 }
 
+// Brings up loopback (lo) and default QEMU virtual ethernet (eth0)
 void setup_networking() {
     std::cout << "[FreeDot Network] Initializing network interfaces...\n";
 
@@ -125,6 +144,9 @@ void setup_networking() {
     }
 }
 
+// Fork and execute a service.
+// For interactive shells, we attach the process to the serial console (ttyS0 or console)
+// using setsid, TIOCSCTTY, and dup2 so the user gets a working terminal.
 void spawn_service(Service& svc) {
     pid_t pid = fork();
 
@@ -134,14 +156,15 @@ void spawn_service(Service& svc) {
     }
 
     if (pid == 0) {
+        // Child process setup
         if (svc.type == ServiceType::INTERACTIVE_SHELL) {
-            setsid();
+            setsid(); // Create a new session so this process becomes session leader
             int fd = open("/dev/ttyS0", O_RDWR);
             if (fd < 0) {
                 fd = open("/dev/console", O_RDWR);
             }
             if (fd >= 0) {
-                ioctl(fd, TIOCSCTTY, 1);
+                ioctl(fd, TIOCSCTTY, 1); // Set controlling terminal
                 dup2(fd, STDIN_FILENO);
                 dup2(fd, STDOUT_FILENO);
                 dup2(fd, STDERR_FILENO);
@@ -149,12 +172,14 @@ void spawn_service(Service& svc) {
             }
         }
 
+        // Prepare arguments for execve
         std::vector<char*> c_args;
         for (const auto& arg : svc.args) {
             c_args.push_back(const_cast<char*>(arg.c_str()));
         }
         c_args.push_back(nullptr);
 
+        // Standard minimal Linux environment variables
         char* const env[] = {
             (char*)"PATH=/bin:/sbin:/usr/bin:/usr/sbin",
             (char*)"TERM=vt100",
@@ -167,11 +192,13 @@ void spawn_service(Service& svc) {
         perror(("[FreeDot Init] execve failed for " + svc.name).c_str());
         exit(1);
     } else {
+        // Parent process records child PID
         svc.pid = pid;
         std::cout << "[FreeDot Init] Started " << svc.name << " (PID: " << pid << ")\n";
     }
 }
 
+// Reads service unit definition files from /etc/freedot.d/*.conf
 void load_services_from_disk() {
     if (!fs::exists(CONFIG_DIR)) {
         std::cerr << "[FreeDot Init] Config directory " << CONFIG_DIR << " not found.\n";
@@ -236,6 +263,13 @@ void load_services_from_disk() {
     }
 }
 
+// Clean system shutdown sequence:
+// 1. Close IPC sockets
+// 2. Politely terminate processes with SIGTERM
+// 3. Force kill stragglers with SIGKILL
+// 4. Flush all dirty cached disk buffers with sync()
+// 5. Unmount all virtual filesystems cleanly
+// 6. Invoke reboot() syscall to power down or reboot
 void perform_shutdown(int cmd) {
     std::cout << "\n=========================================\n";
     std::cout << "  FreeDot Init: Shutting down system...  \n";
@@ -273,6 +307,7 @@ void perform_shutdown(int cmd) {
     while (true) pause();
 }
 
+// Set up a UNIX domain socket at /run/freedot.sock for IPC with freedotctl
 int init_ipc_socket() {
     unlink(SOCKET_PATH);
     int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -302,6 +337,7 @@ int init_ipc_socket() {
     return sock;
 }
 
+// Process incoming commands from freedotctl (status, restart, reload, poweroff, reboot)
 void handle_ipc_requests() {
     if (server_sock_fd < 0) return;
 
@@ -377,6 +413,7 @@ void handle_ipc_requests() {
     close(client_fd);
 }
 
+// Entry point for PID 1 (Init)
 int main() {
     pid_t pid = getpid();
     std::cout << "\n=========================================\n";
@@ -388,6 +425,7 @@ int main() {
         std::cerr << "[FreeDot Init] WARNING: Not running as PID 1!\n";
     }
 
+    // Mount core virtual filesystems needed by userspace programs
     std::cout << "[FreeDot Init] Mounting /proc, /sys, /dev, /run...\n";
     mkdir("/proc", 0755);
     mkdir("/sys", 0755);
@@ -401,6 +439,7 @@ int main() {
     mount("none", "/dev", "devtmpfs", 0, "");
     mount("none", "/run", "tmpfs", 0, "mode=0755");
 
+    // Register signal handlers for zombie reaping (SIGCHLD) and shutdown signals
     struct sigaction sa;
     sa.sa_handler = handle_sigchld;
     sigemptyset(&sa.sa_mask);
@@ -415,13 +454,16 @@ int main() {
     sigaction(SIGPWR, &sa_pwr, nullptr);
     sigaction(SIGTERM, &sa_pwr, nullptr);
 
+    // Initialize IPC socket for freedotctl control utility
     server_sock_fd = init_ipc_socket();
     if (server_sock_fd >= 0) {
         std::cout << "[FreeDot Init] IPC socket listening at " << SOCKET_PATH << "\n";
     }
 
+    // Configure network interfaces
     setup_networking();
 
+    // Parse service unit files and spawn initial services
     std::cout << "[FreeDot Init] Parsing unit configurations...\n";
     load_services_from_disk();
 
@@ -429,6 +471,7 @@ int main() {
         spawn_service(svc);
     }
 
+    // Main Init loop: monitors shutdown requests, handles IPC commands, and respawns dead services
     while (true) {
         if (poweroff_requested) {
             perform_shutdown(RB_POWER_OFF);
@@ -439,6 +482,7 @@ int main() {
 
         handle_ipc_requests();
 
+        // Auto-respawn crashed services marked with respawn=true
         for (auto& svc : services) {
             if (svc.pid == -1 && svc.respawn) {
                 std::cout << "\n[FreeDot Init] Service " << svc.name << " stopped. Respawning...\n";
@@ -447,7 +491,7 @@ int main() {
             }
         }
 
-        usleep(100000);
+        usleep(100000); // 100ms tick to keep CPU usage near zero
     }
 
     return 0;

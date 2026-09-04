@@ -1,4 +1,7 @@
 #!/bin/bash
+# FreeDot Linux — QEMU Boot Runner
+# Boots the compiled Linux kernel with the FreeDot initramfs in headless/serial mode.
+
 set -e
 
 KERNEL=""
@@ -18,6 +21,13 @@ if [ ! -f "$INITRAMFS" ]; then
     exit 1
 fi
 
+# Boot parameters:
+# -m 512M: allocate 512MB of RAM (within our <= 600MB idle budget)
+# -kernel: the compiled Linux LTS kernel binary
+# -initrd: our custom rootfs containing /init (PID 1)
+# -append: kernel boot flags (serial console output on ttyS0, execute /init first)
+# -netdev & -device: virtual e1000 network adapter for networking tests
+# -nographic: redirects console output straight to the terminal
 qemu-system-x86_64 \
     -m 512M \
     -kernel "$KERNEL" \

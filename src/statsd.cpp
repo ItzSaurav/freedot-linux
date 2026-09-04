@@ -1,3 +1,6 @@
+// statsd — Minimal system metrics daemon for FreeDot Linux
+// Polls kernel metrics via the sysinfo() syscall every 5 seconds and logs them to /var/log/stats.log.
+
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -9,6 +12,7 @@ int main() {
 
     while (true) {
         struct sysinfo info;
+        // Query the Linux kernel for uptime, memory usage, and process count
         if (sysinfo(&info) == 0) {
             std::ofstream log_file("/var/log/stats.log", std::ios::app);
             if (log_file.is_open()) {
@@ -20,7 +24,7 @@ int main() {
                 log_file.close();
             }
         }
-        sleep(5);
+        sleep(5); // Run every 5 seconds
     }
     return 0;
 }
