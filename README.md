@@ -6,7 +6,7 @@ A reproducible, minimal Linux distribution and custom C++ init system built from
 
 ## Why Build This
 
-Most modern Linux distros boot into gigabytes of background services, complex D-Bus IPC layers, and tens of thousands of configuration lines. Tbh I wanted to know what happens underneath all that noise.
+Most modern Linux distros boot into gigabytes of background services, complex D-Bus IPC layers, and tens of thousands of configuration lines. I wanted to understand what actually happens underneath all that noise and see how a minimal Linux system starts up from scratch.
 
 FreeDot Linux is a ground-up systems project exploring:
 - Kernel bootstrapping with an upstream Linux LTS kernel.
