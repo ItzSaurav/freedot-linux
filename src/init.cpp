@@ -4,6 +4,7 @@
 #include <sstream>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
 #include <cstring>
 #include <unistd.h>
 #include <fcntl.h>
@@ -15,6 +16,9 @@
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <signal.h>
 #include <cstdlib>
 
@@ -61,6 +65,63 @@ void handle_shutdown_signal(int sig) {
         poweroff_requested = 1;
     } else if (sig == SIGTERM) {
         reboot_requested = 1;
+    }
+}
+
+bool configure_interface(const std::string& ifname, const std::string& ip, const std::string& netmask) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror(("[FreeDot Network] Socket creation failed for " + ifname).c_str());
+        return false;
+    }
+
+    struct ifreq ifr;
+    std::memset(&ifr, 0, sizeof(ifr));
+    std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+
+    struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_addr);
+    addr->sin_family = AF_INET;
+    inet_pton(AF_INET, ip.c_str(), &addr->sin_addr);
+    if (ioctl(sock, SIOCSIFADDR, &ifr) < 0) {
+        close(sock);
+        return false;
+    }
+
+    struct sockaddr_in* mask = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_netmask);
+    mask->sin_family = AF_INET;
+    inet_pton(AF_INET, netmask.c_str(), &mask->sin_addr);
+    if (ioctl(sock, SIOCSIFNETMASK, &ifr) < 0) {
+        close(sock);
+        return false;
+    }
+
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
+        close(sock);
+        return false;
+    }
+    ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
+    if (ioctl(sock, SIOCSIFFLAGS, &ifr) < 0) {
+        close(sock);
+        return false;
+    }
+
+    close(sock);
+    return true;
+}
+
+void setup_networking() {
+    std::cout << "[FreeDot Network] Initializing network interfaces...\n";
+
+    if (configure_interface("lo", "127.0.0.1", "255.0.0.0")) {
+        std::cout << "[FreeDot Network] Loopback (lo) configured: 127.0.0.1/8\n";
+    } else {
+        std::cerr << "[FreeDot Network] Failed to configure loopback (lo)\n";
+    }
+
+    if (configure_interface("eth0", "10.0.2.15", "255.255.255.0")) {
+        std::cout << "[FreeDot Network] Ethernet (eth0) configured: 10.0.2.15/24\n";
+    } else {
+        std::cout << "[FreeDot Network] eth0 not present or deferred.\n";
     }
 }
 
@@ -358,6 +419,8 @@ int main() {
     if (server_sock_fd >= 0) {
         std::cout << "[FreeDot Init] IPC socket listening at " << SOCKET_PATH << "\n";
     }
+
+    setup_networking();
 
     std::cout << "[FreeDot Init] Parsing unit configurations...\n";
     load_services_from_disk();

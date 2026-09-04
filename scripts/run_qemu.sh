@@ -1,13 +1,28 @@
 #!/bin/bash
 set -e
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$PROJECT_ROOT/build"
+KERNEL=""
+if [ -f "build/bzImage" ]; then
+    KERNEL="build/bzImage"
+elif [ -f "build/vmlinuz" ]; then
+    KERNEL="build/vmlinuz"
+else
+    echo "[!] Kernel not found in build/ (looked for bzImage and vmlinuz)."
+    exit 1
+fi
 
-echo "[FreeDot] Launching QEMU..."
+INITRAMFS="build/initramfs.cpio.gz"
+
+if [ ! -f "$INITRAMFS" ]; then
+    echo "[!] initramfs.cpio.gz missing from build/."
+    exit 1
+fi
+
 qemu-system-x86_64 \
-    -kernel "$BUILD_DIR/vmlinuz" \
-    -initrd "$BUILD_DIR/initramfs.cpio.gz" \
-    -append "console=ttyS0 quiet" \
-    -nographic \
-    -m 512M
+    -m 512M \
+    -kernel "$KERNEL" \
+    -initrd "$INITRAMFS" \
+    -append "console=ttyS0 rdinit=/init quiet loglevel=3" \
+    -netdev user,id=net0 \
+    -device e1000,netdev=net0 \
+    -nographic
