@@ -11,7 +11,7 @@
 constexpr const char* SOCKET_PATH = "/run/freedot.sock";
 
 int main(int argc, char* argv[]) {
-    // Basic argument check
+    // Check arguments
     if (argc < 2) {
         std::cerr << "Usage: freedotctl <status | restart <name> | poweroff | reboot>\n";
         return 1;
