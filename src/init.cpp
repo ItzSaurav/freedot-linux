@@ -2,6 +2,8 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
 #include <cstring>
 #include <unistd.h>
 #include <fcntl.h>
@@ -16,6 +18,8 @@
 #include <signal.h>
 #include <cstdlib>
 
+namespace fs = std::filesystem;
+
 enum class ServiceType {
     DAEMON,
     INTERACTIVE_SHELL
@@ -26,8 +30,8 @@ struct Service {
     std::string path;
     std::vector<std::string> args;
     ServiceType type;
-    pid_t pid;
-    bool respawn;
+    pid_t pid = -1;
+    bool respawn = true;
 };
 
 static std::vector<Service> services;
@@ -36,6 +40,7 @@ static volatile sig_atomic_t reboot_requested = 0;
 static int server_sock_fd = -1;
 
 constexpr const char* SOCKET_PATH = "/run/freedot.sock";
+constexpr const char* CONFIG_DIR = "/etc/freedot.d";
 
 void handle_sigchld(int sig) {
     (void)sig;
@@ -103,6 +108,70 @@ void spawn_service(Service& svc) {
     } else {
         svc.pid = pid;
         std::cout << "[FreeDot Init] Started " << svc.name << " (PID: " << pid << ")\n";
+    }
+}
+
+void load_services_from_disk() {
+    if (!fs::exists(CONFIG_DIR)) {
+        std::cerr << "[FreeDot Init] Config directory " << CONFIG_DIR << " not found.\n";
+        return;
+    }
+
+    std::vector<fs::path> config_files;
+    for (const auto& entry : fs::directory_iterator(CONFIG_DIR)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".conf") {
+            config_files.push_back(entry.path());
+        }
+    }
+    std::sort(config_files.begin(), config_files.end());
+
+    for (const auto& file_path : config_files) {
+        std::ifstream file(file_path);
+        if (!file.is_open()) continue;
+
+        Service svc;
+        svc.type = ServiceType::DAEMON;
+        svc.respawn = true;
+
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.empty() || line[0] == '#') continue;
+
+            auto delimiter_pos = line.find('=');
+            if (delimiter_pos == std::string::npos) continue;
+
+            std::string key = line.substr(0, delimiter_pos);
+            std::string value = line.substr(delimiter_pos + 1);
+
+            if (key == "name") {
+                svc.name = value;
+            } else if (key == "exec") {
+                svc.path = value;
+                svc.args = {value.substr(value.find_last_of('/') + 1)};
+            } else if (key == "type") {
+                if (value == "interactive") {
+                    svc.type = ServiceType::INTERACTIVE_SHELL;
+                } else {
+                    svc.type = ServiceType::DAEMON;
+                }
+            } else if (key == "respawn") {
+                svc.respawn = (value == "true" || value == "1");
+            }
+        }
+
+        if (!svc.name.empty() && !svc.path.empty()) {
+            bool exists = false;
+            for (const auto& existing : services) {
+                if (existing.name == svc.name) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                services.push_back(svc);
+                std::cout << "[FreeDot Init] Loaded unit file: " << file_path.filename().string() << " (" << svc.name << ")\n";
+            }
+        }
     }
 }
 
@@ -176,9 +245,7 @@ void handle_ipc_requests() {
     if (server_sock_fd < 0) return;
 
     int client_fd = accept(server_sock_fd, nullptr, nullptr);
-    if (client_fd < 0) {
-        return; // No incoming connection pending
-    }
+    if (client_fd < 0) return;
 
     char buffer[512];
     std::memset(buffer, 0, sizeof(buffer));
@@ -226,6 +293,9 @@ void handle_ipc_requests() {
         if (!found) {
             response = "Error: Service '" + target + "' not recognized.\n";
         }
+    } else if (action == "reload") {
+        load_services_from_disk();
+        response = "Reloaded service definitions from " + std::string(CONFIG_DIR) + "\n";
     } else if (action == "poweroff") {
         response = "System poweroff initiated...\n";
         write(client_fd, response.c_str(), response.length());
@@ -239,7 +309,7 @@ void handle_ipc_requests() {
         reboot_requested = 1;
         return;
     } else {
-        response = "Unknown command: " + action + "\nSupported: status, restart <name>, poweroff, reboot\n";
+        response = "Unknown command: " + action + "\nSupported: status, restart <name>, reload, poweroff, reboot\n";
     }
 
     write(client_fd, response.c_str(), response.length());
@@ -284,30 +354,13 @@ int main() {
     sigaction(SIGPWR, &sa_pwr, nullptr);
     sigaction(SIGTERM, &sa_pwr, nullptr);
 
-    // Initialize UNIX domain IPC server
     server_sock_fd = init_ipc_socket();
     if (server_sock_fd >= 0) {
         std::cout << "[FreeDot Init] IPC socket listening at " << SOCKET_PATH << "\n";
     }
 
-    services = {
-        {
-            "Metrics Daemon",
-            "/bin/freedot-statsd",
-            {"freedot-statsd"},
-            ServiceType::DAEMON,
-            -1,
-            true
-        },
-        {
-            "Interactive Shell",
-            "/bin/sh",
-            {"sh"},
-            ServiceType::INTERACTIVE_SHELL,
-            -1,
-            true
-        }
-    };
+    std::cout << "[FreeDot Init] Parsing unit configurations...\n";
+    load_services_from_disk();
 
     for (auto& svc : services) {
         spawn_service(svc);
@@ -321,10 +374,8 @@ int main() {
             perform_shutdown(RB_AUTOBOOT);
         }
 
-        // Process incoming IPC requests from freedotctl
         handle_ipc_requests();
 
-        // Supervise services
         for (auto& svc : services) {
             if (svc.pid == -1 && svc.respawn) {
                 std::cout << "\n[FreeDot Init] Service " << svc.name << " stopped. Respawning...\n";
@@ -333,7 +384,7 @@ int main() {
             }
         }
 
-        usleep(100000); // 100ms loop period
+        usleep(100000);
     }
 
     return 0;
