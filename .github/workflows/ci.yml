@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build and Verify C++20 Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Compiler
+        run: sudo apt-get update && sudo apt-get install -y g++ build-essential
+
+      - name: Compile Userspace Binaries
+        run: |
+          g++ -std=c++20 -Wall -Wextra src/init.cpp -o freedot-init
+          g++ -std=c++20 -Wall -Wextra src/freedotctl.cpp -o freedotctl
+          g++ -std=c++20 -Wall -Wextra src/statsd.cpp -o statsd
+
+      - name: Build and Run Test Suite
+        run: |
+          g++ -std=c++20 -Wall -Wextra src/init_test.cpp -o init_test
+          ./init_test

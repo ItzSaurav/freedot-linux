@@ -1,6 +1,35 @@
 # FreeDot Linux
 
+[![CI](https://github.com/ItzSaurav/freedot-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/ItzSaurav/freedot-linux/actions/workflows/ci.yml)
+
 A reproducible, minimal Linux distribution and custom C++ init system built from the ground up to understand how Linux actually boots, manages processes, and brings up userspace without systemd bloat.
+
+---
+
+## Architecture Flow
+
+```mermaid
+flowchart TD
+    subgraph Boot ["1. Boot Stage"]
+        FW["BIOS / UEFI Firmware"] --> BL["Bootloader (Syslinux / GRUB)"]
+        BL --> KERNEL["Linux Kernel (bzImage)"]
+        KERNEL --> INITRAMFS["initramfs Archive (CPIO gzip)"]
+    end
+
+    subgraph Supervisor ["2. PID 1 Supervisor (/init)"]
+        INITRAMFS --> PID1["src/init.cpp (C++20 Binary)"]
+        PID1 --> MOUNT["Mount Virtual FS (/proc, /sys, /dev, /run)"]
+        PID1 --> NET["Kernel Socket ioctl Bringup (lo: 127.0.0.1, eth0: DHCP)"]
+        PID1 --> REAP["Signal Handler & Zombie Reaping (SIGCHLD)"]
+        PID1 --> IPC["UNIX Domain Socket Server (/run/freedot.sock)"]
+    end
+
+    subgraph Userspace ["3. Userspace Execution"]
+        PID1 --> SHELL["Interactive TTY Shell (/bin/sh on /dev/console)"]
+        PID1 --> STATSD["System Telemetry Daemon (src/statsd.cpp)"]
+        IPC <--> CLI["Management Client (src/freedotctl.cpp)"]
+    end
+```
 
 ---
 
