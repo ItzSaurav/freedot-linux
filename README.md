@@ -86,12 +86,7 @@ freedotctl poweroff
 
 # Cleanly unmount filesystems and reboot
 freedotctl reboot
-```
 
-### 3. System Metrics Daemon (`src/statsd.cpp`)
-A minimal telemetry background daemon that queries kernel health via the `sysinfo()` syscall every 5 seconds. Records uptime, free/total RAM, and process counts to `/var/log/stats.log`.
-
----
 
 ## Repository Structure
 
